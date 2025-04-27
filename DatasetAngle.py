@@ -83,6 +83,48 @@ class SquatPhaseDataset(Dataset):
             sequences.append(window)
             seq_labels.append(majority)
         return np.array(sequences), np.array(seq_labels)
+    
+    # def _create_sequences(self, features, labels):
+    #     """Create sequences with adaptive labeling for squat phases using features and labels arrays."""
+    #     sequences = []
+    #     seq_labels = []
+        
+    #     # features: (num_frames, 4)
+    #     # labels:   (num_frames,)
+        
+    #     # Apply feature-specific smoothing
+    #     smoothed = np.array([
+    #         gaussian_filter1d(features[:, i], sigma=self.sigma * (1 + i * 0.2))
+    #         for i in range(features.shape[1])
+    #     ]).T  # shape (num_frames, 4)
+        
+    #     # Create sequences with 66% overlap
+    #     for i in range(0, len(features) - self.seq_length + 1, self.seq_length // 3):
+    #         window = smoothed[i:i+self.seq_length]
+            
+    #         # Calculate knee angles (average of left and right)
+    #         knee_angles = (window[:, 0] + window[:, 1]) / 2
+            
+    #         # Calculate angle differences
+    #         angle_diffs = np.diff(knee_angles)
+            
+    #         # Calculate total knee angle change
+    #         total_angle_change = np.abs(knee_angles[-1] - knee_angles[0])
+            
+    #         # Phase detection logic (adaptive labeling)
+    #         if total_angle_change < 0.07:  # Equivalent to self.min_angle_change
+    #             current_label = seq_labels[-1] if seq_labels else 0
+    #         elif np.all(angle_diffs > 0):
+    #             current_label = 1  # UP phase
+    #         elif np.all(angle_diffs < 0):
+    #             current_label = 0  # DOWN phase
+    #         else:
+    #             current_label = seq_labels[-1] if seq_labels else 0
+            
+    #         sequences.append(window)
+    #         seq_labels.append(current_label)
+        
+    #     return np.array(sequences), np.array(seq_labels)
 
     def _load_and_preprocess(self, csv_path):
         df = pd.read_csv(csv_path)

@@ -18,7 +18,7 @@ CONFIG = {
     'epochs': 50,
     'threshold_pct': 50,  # Percentile for UP/DOWN threshold
     'sigma': 2.5,
-    'early_stopping_patience': 5,
+    'early_stopping_patience': 10,
     'class_weights': torch.tensor([1.0, 1.0])  # Add class weights (e.g., for UP, DOWN, STABLE)
 }
 
@@ -143,8 +143,11 @@ def train_model(train_loader, val_loader):
     
     # Tracking variables
     grad_norms = []
+    train_losses = []  # Store avg train loss per epoch
+    val_losses = []    # Store avg val loss per epoch
     best_f1 = 0
     patience_counter = 0
+    lr_counter = 0
     
     for epoch in range(CONFIG['epochs']):
         model.train()
@@ -152,14 +155,14 @@ def train_model(train_loader, val_loader):
         current_grad_norms = []
         
         for seq, labels in train_loader:
-            seq, labels = seq.to(device), labels.long().to(device)  # Convert labels to integers
+            seq, labels = seq.to(device), labels.long().to(device)
             
             optimizer.zero_grad()
             outputs = model(seq)
             loss = criterion(outputs, labels)
             loss.backward()
             
-            # Calculate gradient norm
+            # Gradient norm calculation
             total_norm = 0
             for p in model.parameters():
                 if p.grad is not None:
@@ -174,42 +177,67 @@ def train_model(train_loader, val_loader):
             
             train_loss += loss.item()
         
-        # Store gradient norms
+        avg_train_loss = train_loss / len(train_loader)
+        train_losses.append(avg_train_loss)
         grad_norms.extend(current_grad_norms)
         
         # Validation
+        model.eval()
+        val_loss = 0
+        with torch.no_grad():
+            for seq, labels in val_loader:
+                seq, labels = seq.to(device), labels.long().to(device)
+                outputs = model(seq)
+                loss = criterion(outputs, labels)
+                val_loss += loss.item()
+        
+        avg_val_loss = val_loss / len(val_loader)
+        val_losses.append(avg_val_loss)
+        
         val_metrics = evaluate(model, val_loader, device)
         
         print(f"\nEpoch {epoch+1}/{CONFIG['epochs']}:")
-        print(f"  Train Loss: {train_loss/len(train_loader):.4f}")
+        print(f"  Train Loss: {avg_train_loss:.4f}")
+        print(f"  Val Loss: {avg_val_loss:.4f}")
         print(f"  Val Acc: {val_metrics['accuracy']:.4f}")
         print(f"  Val F1: {val_metrics['f1']:.4f}")
         print(f"  Avg Grad Norm: {np.mean(current_grad_norms):.4f}")
         print(f"  Confusion Matrix:\n{val_metrics['confusion_matrix']}")
         
-        # Early stopping and learning rate adjustment
+        # Early stopping
         if val_metrics['f1'] > best_f1:
             best_f1 = val_metrics['f1']
             patience_counter = 0
-            torch.save(model.state_dict(), "best_model.pth")
+            torch.save(model.state_dict(), "models/lstm_model.pth")
         else:
             patience_counter += 1
             if patience_counter >= CONFIG['early_stopping_patience']:
                 print(f"\nEarly stopping at epoch {epoch+1}")
                 break
-            
-            # Reduce learning rate if no improvement
-            if patience_counter % 2 == 0:
+            if (lr_counter >= 5):
+                lr_counter = 0
                 for g in optimizer.param_groups:
                     g['lr'] *= 0.5
                 print(f"Reducing learning rate to {optimizer.param_groups[0]['lr']:.2e}")
+            else:
+                lr_counter += 1
     
     # Plot training curves
     plt.figure(figsize=(12, 4))
+    plt.subplot(1, 2, 1)
     plt.plot(grad_norms)
     plt.title("Gradient Norms During Training")
     plt.xlabel("Iteration")
     plt.ylabel("Gradient Norm")
+    
+    plt.subplot(1, 2, 2)
+    plt.plot(train_losses, label='Train Loss')
+    plt.plot(val_losses, label='Val Loss')
+    plt.title("Loss Curves")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.legend()
+    plt.tight_layout()
     plt.show()
     
     return model
