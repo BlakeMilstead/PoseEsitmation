@@ -79,11 +79,19 @@ class SquatPhaseDataset(Dataset):
             window_labels = labels[i:i + self.seq_length]
             if len(window_labels) < self.seq_length:
                 continue
+            
+            # Calculate frame-to-frame differences
+            delta = np.diff(window, axis=0, prepend=window[0:1])
+
+            # Concatenate position and motion (velocity) features
+            full_features = np.concatenate([window, delta], axis=1)  # Now shape (seq_length, 8)
+
             majority = np.bincount(window_labels).argmax()
-            sequences.append(window)
+            sequences.append(full_features)
             seq_labels.append(majority)
+            
         return np.array(sequences), np.array(seq_labels)
-    
+
     # def _create_sequences(self, features, labels):
     #     """Create sequences with adaptive labeling for squat phases using features and labels arrays."""
     #     sequences = []

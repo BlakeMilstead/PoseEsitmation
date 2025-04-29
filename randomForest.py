@@ -195,6 +195,27 @@ plt.show()
 joblib.dump(best_rf_model, "models/best_rf_model.pkl")
 print("Random Forest model saved successfully!")
 
+# Extract mean validation scores for each hyperparameter combination
+xgb_results = xgb_grid_search.cv_results_
+mean_test_scores = xgb_results['mean_test_score']
+params = xgb_results['params']
+
+# Create a DataFrame for easier plotting
+xgb_scores_df = pd.DataFrame(params)
+xgb_scores_df['mean_test_score'] = mean_test_scores
+
+# Sort by validation score
+xgb_scores_df = xgb_scores_df.sort_values(by='mean_test_score', ascending=False)
+
+# Plot
+plt.figure(figsize=(12, 6))
+plt.plot(range(len(xgb_scores_df)), xgb_scores_df['mean_test_score'], marker='o')
+plt.title('Random Forest Validation Accuracy over Hyperparameter Search')
+plt.xlabel('Hyperparameter Combination')
+plt.ylabel('Validation Accuracy')
+plt.grid()
+plt.show()
+
 # Save the best Random Forest model
 joblib.dump(best_xgb_model, "models/best_xgb_model.pkl")
 print("Random Forest model saved successfully!")

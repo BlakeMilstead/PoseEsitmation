@@ -8,28 +8,22 @@ from FrameDataset import SquatKneeFrameDataset
 from mlp import SquatMLP
 from BaseClassifier import PhaseLSTM
 import torch.nn.functional as F
+from collections import deque
 
-# Load pretrained models
 def load_models():
-    # MLP
     mlp_model = SquatMLP(input_dim=4)
-    mlp_model.load_state_dict(torch.load("models/mlp_model.pth", map_location=torch.device('cpu')))
+    mlp_model.load_state_dict(torch.load("models/mlp_model.pth", map_location='cpu'))
     mlp_model.eval()
 
-    # Random Forest
     rf_model = joblib.load("models/best_rf_model.pkl")
-
-    # XGBoost
     xgb_model = joblib.load("models/best_xgb_model.pkl")
 
-    # LSTM
-    lstm_model = PhaseLSTM(input_size=4)
-    lstm_model.load_state_dict(torch.load("models/lstm_model.pth", map_location=torch.device('cpu')))
+    lstm_model = PhaseLSTM(input_size=8)
+    lstm_model.load_state_dict(torch.load("models/lstm_model.pth", map_location='cpu'))
     lstm_model.eval()
 
     return mlp_model, rf_model, xgb_model, lstm_model
 
-# Feature extraction from MediaPipe landmarks
 def extract_features(lmList):
     joints = {}
     for lm in lmList:
@@ -56,19 +50,23 @@ def extract_features(lmList):
     except:
         return None
 
-# Temporal buffer for LSTM
-from collections import deque
 lstm_buffer = deque(maxlen=30)
+raw_feature_buffer = deque(maxlen=1)  # stores only latest raw features
 
-# Main real-time prediction function
 def run_video(video_path):
     cap = cv2.VideoCapture(video_path)
     detector = PoseDetector()
     yolo_net, output_layers, class_names = load_yolo_model()
     mlp_model, rf_model, xgb_model, lstm_model = load_models()
 
-    scaler = joblib.load("models/scaler.pkl")
-    print("Scaler loaded successfully!")
+    scaler_4 = joblib.load("models/scaler.pkl")             # for MLP, RF, XGB (4 features)
+    scaler_8 = joblib.load("models/lstm_scaler.pkl")        # for LSTM (8 features)
+    print("Scalers loaded successfully!")
+
+    frame_width, frame_height = 800, 600
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30
+    output_path = video_path.split('/')[-1].replace('.mov', '_predictions.mp4')
+    out = cv2.VideoWriter(output_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (frame_width, frame_height))
 
     while True:
         ret, frame = cap.read()
@@ -82,8 +80,8 @@ def run_video(video_path):
         height, width = frame.shape[:2]
         boxes = []
 
-        for out in outputs:
-            for detection in out:
+        for outp in outputs:
+            for detection in outp:
                 scores = detection[5:]
                 class_id = np.argmax(scores)
                 confidence = scores[class_id]
@@ -98,75 +96,85 @@ def run_video(video_path):
 
         if boxes:
             frame_center = np.array([width // 2, height // 2])
-            min_dist = float('inf')
-            best_box = None
+            best_box = min(boxes, key=lambda b: np.linalg.norm(np.array([b[0]+b[2]//2, b[1]+b[3]//2]) - frame_center))
 
-            for (x, y, w, h) in boxes:
-                box_center = np.array([x + w // 2, y + h // 2])
-                dist = np.linalg.norm(box_center - frame_center)
-                if dist < min_dist:
-                    min_dist = dist
-                    best_box = (x, y, w, h)
-                        
-            if best_box is not None:
+            if best_box:
                 x, y, w, h = best_box
                 x, y = max(0, x), max(0, y)
-                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
                 cropped = frame[y:y+h, x:x+w]
-                pose_img = detector.findPose(cropped)
+                detector.findPose(cropped)
                 lmList = detector.findPosition(cropped)
 
-            if lmList:
-                features = extract_features(lmList)
-                if features is not None:
-                    # Scale features
-                    scaled_features = scaler.transform(features.reshape(1, -1))
+                if lmList:
+                    features = extract_features(lmList)
+                    if features is not None:
+                        # ==== Frame models (4 features)
+                        scaled_features = scaler_4.transform(features.reshape(1, -1))
+                        temp_features = scaled_features.flatten()
 
-                    # Temporal features for RF/XGB
-                    temp_features = scaled_features.flatten()
+                        mlp_pred = torch.softmax(mlp_model(torch.tensor(scaled_features, dtype=torch.float32)), dim=1)
+                        mlp_label = "UP" if mlp_pred.argmax() == 1 else "DOWN"
 
-                    # MLP Prediction
-                    mlp_pred = torch.softmax(mlp_model(torch.tensor(scaled_features, dtype=torch.float32)), dim=1)
-                    mlp_label = "UP" if mlp_pred.argmax() == 1 else "DOWN"
+                        rf_label = "UP" if rf_model.predict(temp_features.reshape(1, -1))[0] == 1 else "DOWN"
+                        xgb_label = "UP" if xgb_model.predict(temp_features.reshape(1, -1))[0] == 1 else "DOWN"
 
-                    # Random Forest Prediction
-                    rf_pred = rf_model.predict(temp_features.reshape(1, -1))[0]
-                    rf_label = "UP" if rf_pred == 1 else "DOWN"
+                        # ==== LSTM (8 features)
+                        if len(raw_feature_buffer) > 0:
+                            last_raw_features = raw_feature_buffer[-1]
+                            delta = features - last_raw_features
+                        else:
+                            delta = np.zeros_like(features)
 
-                    # XGBoost Prediction
-                    xgb_pred = xgb_model.predict(temp_features.reshape(1, -1))[0]
-                    xgb_label = "UP" if xgb_pred == 1 else "DOWN"
+                        # Now store current raw features
+                        raw_feature_buffer.append(features)
 
-                    # LSTM Prediction
-                    lstm_buffer.append(features)
-                    if len(lstm_buffer) == 30:
-                        lstm_input = torch.tensor(np.stack(lstm_buffer)).unsqueeze(0).float()
-                        lstm_out = torch.softmax(lstm_model(lstm_input), dim=1)
-                        lstm_label = "UP" if lstm_out.argmax() == 1 else "DOWN"
-                    else:
-                        lstm_label = "---"
+                        # Concatenate angles + deltas
+                        full_features = np.concatenate([features, delta])
 
-                    y_offset = 30
-                    colors = {
-                        "MLP": (255, 0, 0),   # Blue
-                        "RF": (0, 255, 0),    # Green
-                        "XGB": (0, 0, 255),   # Red
-                        "LSTM": (0, 255, 255) # Yellow
-                    }
+                        # Now scale the 8 features properly
+                        scaled_lstm_input = scaler_8.transform(full_features.reshape(1, -1)).flatten()
 
-                    for model_name, pred_label in zip(["MLP", "RF", "XGB", "LSTM"], [mlp_label, rf_label, xgb_label, lstm_label]):
-                        color = colors.get(model_name, (255, 255, 255))  # Default white if missing
-                        cv2.putText(frame, f"{model_name}: {pred_label}", (10, y_offset), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
-                        y_offset += 30
+                        # Append scaled to lstm_buffer
+                        lstm_buffer.append(scaled_lstm_input)
+
+
+                        if len(lstm_buffer) == 30:
+                            lstm_seq = torch.tensor(np.stack(lstm_buffer)).unsqueeze(0).float()
+                            lstm_out = torch.softmax(lstm_model(lstm_seq), dim=1)
+                            confidence = lstm_out.max().item()
+                            pred_class = lstm_out.argmax().item()
+                            lstm_label = "UP" if pred_class == 1 else "DOWN"
+                            # Optional: add confidence threshold
+                            if confidence < 0.6:
+                                lstm_label = "---"
+                        else:
+                            lstm_label = "---"
+
+                        y_offset = 30
+                        colors = {
+                            "MLP": (255, 0, 0),
+                            "RF": (0, 255, 0),
+                            "XGB": (0, 0, 255),
+                            "LSTM": (0, 255, 255)
+                        }
+
+                        for model_name, pred_label in zip(["MLP", "RF", "XGB", "LSTM"], [mlp_label, rf_label, xgb_label, lstm_label]):
+                            color = colors.get(model_name, (255, 255, 255))
+                            cv2.putText(frame, f"{model_name}: {pred_label}", (10, y_offset),
+                                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+                            y_offset += 30
 
         resized = cv2.resize(frame, (800, 600))
         cv2.imshow("Squat Prediction", resized)
+        out.write(resized)
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
 
     cap.release()
+    out.release()
     cv2.destroyAllWindows()
 
 if __name__ == "__main__":
-    run_video("AllVids/Fort3.mov")  # <<< Replace with your video path!
+    run_video("AllVids/Fort3.mov")
